@@ -1,0 +1,24 @@
+
+year <- sub("-.*", "", meta$Date)
+if(!length(year))
+  year <- substr(Sys.Date(),1,4)
+vers <- meta$Version
+if(is.null(vers))
+  vers <- packageVersion("mgwrsar")
+vers <- paste("R package version", vers)
+
+# Grab authors from DESCRIPTION file
+# authors <- eval(parse(text=as.list(read.dcf("../DESCRIPTION")[1, ])$`Authors@R`))
+# authors <- authors[sapply(authors$role, function(roles) "aut" %in% roles)]
+# authors <- sapply(authors, function(author) paste(author$given, author$family))
+# authors <- paste(authors, collapse = " and ")
+
+citHeader("To cite the mgwrsar package in publications, please use:")
+
+bibentry(bibtype = "article",
+title = "A new method for dealing simultaneously with spatial autocorrelation and spatial heterogeneity in regression models",
+author = "Ghislain Geniaux and Davide Martinetti",
+journal = "Regional Science and Urban Economics",
+year = "2017",
+doi = "10.1016/j.regsciurbeco.2017.04.001",
+keywords = "Local models, Geographically weighted regression, Mixed GWR, SAR")

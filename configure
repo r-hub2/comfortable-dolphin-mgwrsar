@@ -1,0 +1,87 @@
+#!/bin/sh
+
+# OpenMP policy:
+# - default is OFF to keep install/load/check robust everywhere
+# - users can opt in with MGWRSAR_OPENMP=1
+
+MY_CPPFLAGS=""
+MY_CXXFLAGS=""
+MY_LIBS=""
+OMP_MAKE_FLAGS=""
+OMP_DISABLE_BLOCK=""
+
+OPENMP_MODE=$(printf '%s' "${MGWRSAR_OPENMP:-0}" | tr '[:upper:]' '[:lower:]')
+ENABLE_OPENMP=0
+
+case "${OPENMP_MODE}" in
+  1|true|yes|on|enable|enabled)
+    ENABLE_OPENMP=1
+    ;;
+  0|false|no|off|disable|disabled|"")
+    ENABLE_OPENMP=0
+    ;;
+  auto)
+    ENABLE_OPENMP=0
+    echo "configure: MGWRSAR_OPENMP=auto -> defaulting to OpenMP OFF (set MGWRSAR_OPENMP=1 to force ON)."
+    ;;
+  *)
+    ENABLE_OPENMP=0
+    echo "configure: Unknown MGWRSAR_OPENMP='${MGWRSAR_OPENMP}', defaulting to OpenMP OFF."
+    ;;
+esac
+
+if [ "${ENABLE_OPENMP}" = "1" ]; then
+  OMP_MAKE_FLAGS='$(SHLIB_OPENMP_CXXFLAGS)'
+  OS_NAME=$(uname)
+
+  if [ "${OS_NAME}" = "Darwin" ]; then
+    echo "configure: OpenMP requested on macOS. Checking for libomp..."
+    if command -v brew >/dev/null 2>&1; then
+      OMP_PATH=$(brew --prefix libomp 2>/dev/null)
+    fi
+
+    if [ -n "${OMP_PATH}" ] && [ -f "${OMP_PATH}/include/omp.h" ]; then
+      MY_CPPFLAGS="-I${OMP_PATH}/include"
+      MY_CXXFLAGS="-Xpreprocessor -fopenmp"
+      MY_LIBS="-L${OMP_PATH}/lib -lomp"
+      echo "configure: OpenMP enabled with libomp at ${OMP_PATH}."
+    else
+      echo "configure: libomp not found -> falling back to OpenMP OFF."
+      OMP_MAKE_FLAGS=""
+      MY_CPPFLAGS=""
+      MY_CXXFLAGS=""
+      MY_LIBS=""
+    fi
+  else
+    echo "configure: OpenMP requested. Using R toolchain OpenMP flags."
+  fi
+else
+  echo "configure: OpenMP disabled (set MGWRSAR_OPENMP=1 to enable)."
+  OS_NAME=$(uname)
+  if [ "${OS_NAME}" = "Darwin" ]; then
+    MY_LIBS="-Wl,-dead_strip_dylibs"
+  else
+    MY_LIBS="-Wl,--as-needed"
+  fi
+  OMP_DISABLE_BLOCK='
+SHLIB_OPENMP_CFLAGS =
+SHLIB_OPENMP_CXXFLAGS =
+SHLIB_OPENMP_FFLAGS =
+'
+fi
+
+echo "configure: Creating src/Makevars..."
+
+cat > src/Makevars <<EOF
+CXX_STD = CXX17
+${OMP_DISABLE_BLOCK}
+
+PKG_CPPFLAGS = -DOPENBLAS_NUM_THREADS=1 -DMKL_NUM_THREADS=1 -DOMP_NUM_THREADS=1 ${MY_CPPFLAGS}
+PKG_CXXFLAGS = ${OMP_MAKE_FLAGS} ${MY_CXXFLAGS}
+PKG_LIBS = ${OMP_MAKE_FLAGS} \$(LAPACK_LIBS) \$(BLAS_LIBS) \$(FLIBS) ${MY_LIBS}
+
+OBJECTS = mgwrsar.o gwr_core.o knn_stable_sort.o RcppExports_arma.o RcppExports_eigen.o init.o
+EOF
+
+echo "" >> src/Makevars
+echo "configure: src/Makevars created successfully."
