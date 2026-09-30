@@ -18,11 +18,12 @@ Performance
 	•	Overall, `tds_mgtwr` runs about 3 to 4 times faster (n = 1000 to 5000), and a GWR bandwidth search about 1.7 times faster.
 
 Dependencies
-	•	The package no longer imports SMUT (which brought SKAT, SPAtest and RSpectra with it). The dense products of hat matrices use the same Eigen product, now compiled in the package, or R's `%*%` when R is linked to an optimised BLAS (Accelerate, OpenBLAS, MKL, BLIS, ATLAS, FlexiBLAS), which is then much faster. `options(mgwrsar.matprod = "eigen")` or `"blas"` forces one of the two.
+	•	The package no longer imports SMUT (which brought SKAT, SPAtest and RSpectra with it). The dense products of hat matrices use the same Eigen product, now compiled in the package, or R's `%*%` when R is linked to an optimised BLAS (Accelerate, OpenBLAS, MKL, BLIS, ATLAS, FlexiBLAS, ArmPL), which is then much faster. `options(mgwrsar.matprod = "eigen")` or `"blas"` forces one of the two.
 
 TDS algorithms
 	•	`TDS_MGWR()`: the control levers are repaired for `Type = 'GDT'`. `control_tds$H` and `control_tds$Ht` pin bandwidths per coefficient and per axis (one value per varying coefficient, or a named vector for a subset; `NA` leaves a bandwidth free, `Inf` makes it global); `control_tds$V` is a grid of neighbour counts; the adaptive temporal grid mirrors the spatial one.
 	•	`TDS_MGWR()`: after a rejected sweep, residuals and the trace of the hat matrix are reset to the best state together with the coefficients. When all bandwidths are pinned, the returned model is the fixed point of the backfitting, independent of the starting model. On the default path the selected bandwidths are unchanged; RMSE and AICc may differ at the third significant digit from 1.3.2.
+	•	`TDS_MGWR()`: `control_tds$TRUEBETA` (true coefficients, for simulations) no longer stops with an error; the slot `HRMSE` of the returned model then holds the RMSE of each coefficient for the starting model and every kept sweep.
 	•	`TDS_MGWR()`: fixes with `fixed_vars` (dimension of the per-coefficient trace, bandwidth vectors restricted to varying coefficients).
 	•	`TDS_MGWR()`: with a fixed spatial kernel and repeated locations (panel data), the spatial bandwidth grid is now extended below the distance to the first site, down to `control_tds$panel_floor` times that distance (default 0.2 for a Gaussian kernel, 0.5 otherwise; 1 restores the previous grid). The neighbour-count grid stopped at the 3rd/4th site, one lattice step on a regular panel, which censored the bandwidths of the roughest coefficients; a Gaussian kernel, whose bandwidth is a standard deviation, was censored at about three times its optimal scale.
 	•	New `control_tds$V_dist`: spatial bandwidth grid given directly in distances (fixed kernel), taken as is.

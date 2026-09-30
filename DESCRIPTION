@@ -29,7 +29,7 @@ Authors@R: c(person(given = "Ghislain",
                person(given = "César",
                       family = "Martinez",
                       role = "aut"))
-Packaged: 2026-09-30 10:12:25 UTC; geniaux
+Packaged: 2026-09-30 12:21:14 UTC; geniaux
 Author: Ghislain Geniaux [aut, cre],
   Davide Martinetti [aut],
   César Martinez [aut]

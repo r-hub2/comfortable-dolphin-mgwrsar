@@ -45,6 +45,7 @@
 #'   \item{\code{first_nn}}{Integer. Top of the spatial bandwidth sequence, in numbers of neighbours. Default \code{nrow(data)}.}
 #'   \item{\code{trunc_gauss}}{Numeric or \code{NULL}. Fixed gaussian spatial kernel only: when set to \eqn{c}, each bandwidth \eqn{h} of the descent is evaluated on the neighbours within distance \eqn{c h} (relative weight \eqn{e^{-c^2/2}} beyond: 1.5e-8 for \eqn{c = 6}, 1.3e-14 for \eqn{c = 8}), which shrinks the weight matrices at small scales. \code{NULL} (default) keeps every neighbour. Fixed compact kernels are always truncated exactly (zero weights dropped), as adaptive ones already were.}
 #'   \item{\code{minv}}{Integer. Floor of the spatial bandwidth sequence, in numbers of neighbours: the grid stops at the median distance to the \code{minv}-th neighbour (or at \code{minv} neighbours for an adaptive kernel). Default: the identifiability floor, 2 for a Gaussian kernel and \code{K + 1} for compact-support kernels. Raising it above that floor truncates the descent: a coefficient whose optimal bandwidth is smaller stops on the grid floor with a censored bandwidth and non-converged coefficients, so a warning is issued at setup and again when a bandwidth ends on the floor.}
+#'   \item{\code{TRUEBETA}}{Numeric matrix. Diagnostic lever for simulations: the true coefficients, one row per observation and one column per coefficient of the model matrix (\code{Intercept} first). When given, the slot \code{HRMSE} of the returned model holds, for the starting model (row 1) and each kept sweep, the RMSE of every coefficient, their mean, the spatial bandwidth of the last varying coefficient, the AICc (\code{get_AIC = TRUE}) and the residual RMSE. Default \code{NULL}.}
 #' }
 #' @param control A named list of standard control arguments passed to the internal \code{MGWRSAR} calls:
 #' \describe{
@@ -416,6 +417,26 @@ TDS_MGWR <- function(formula, data, coords,
       }
       HOPT <- rep(NA, K)
       names(HOPT) <- namesX
+      # Diagnostic lever: with the true coefficients known (simulations), the
+      # RMSE of each coefficient is tracked along the backfitting. Row 1 is the
+      # starting model, row i + 1 the i-th sweep; the unused rows (NA) are
+      # dropped when the model is assembled.
+      # (control_tds is copied into this environment only after this function:
+      # read the lever from the list, and store the coerced matrix back in it)
+      if (!is.null(control_tds$TRUEBETA)) {
+        TRUEBETA <- control_tds$TRUEBETA <- as.matrix(control_tds$TRUEBETA)
+        if (!is.numeric(TRUEBETA) || nrow(TRUEBETA) != n || ncol(TRUEBETA) != K)
+          stop(
+            paste0(
+              "`control_tds$TRUEBETA` must be a numeric matrix with one row per ",
+              "observation (", n, ") and one column per coefficient of the model ",
+              "matrix (", K, ", `Intercept` first)."
+            ),
+            call. = FALSE
+          )
+        HRMSE <- matrix(NA_real_, nrow = control_tds$maxit + 1L, ncol = K + 4L)
+        colnames(HRMSE) <- c(paste0('RMSE_', namesX), 'meanRMSE', 'h', 'AICc', 'RMSE')
+      }
     })
   }
   init_param_tds()
@@ -1429,6 +1450,14 @@ TDS_MGWR <- function(formula, data, coords,
 
       # Initialize best parameters and convergence deltas
       bestBETA = BETA
+      if (!is.null(TRUEBETA)) {
+        # row 1: the starting model, so that HRMSE and HBETA line up
+        for (k in 1:K)
+          HRMSE[1, k] = sqrt(mean((TRUEBETA[, k] - BETA[, k])^2))
+        HRMSE[1, K + 1] <- mean(HRMSE[1, 1:K])
+        if (control_tds$get_AIC && exists("myAICc")) HRMSE[1, K + 3] <- myAICc
+        HRMSE[1, K + 4] <- rmse
+      }
       if (control_tds$get_AIC) {
         mybestS = S
         mybestRk = Rk
@@ -1907,7 +1936,7 @@ TDS_MGWR <- function(formula, data, coords,
 
       BETA <- bestBETA
       if (!is.null(TRUEBETA))
-        HRMSE <- HRMSE[1:mybestG, ]
+        HRMSE <- HRMSE[1:mybestG, , drop = FALSE]
       HBETA <- HBETA[1:mybestG]
 
       fit = rowSums(BETA * X)
@@ -2016,7 +2045,7 @@ TDS_MGWR <- function(formula, data, coords,
 
 
       if (!is.null(TRUEBETA))
-        modelGWR@HRMSE <- HRMSE[!is.na(HRMSE[, 1]), ]
+        modelGWR@HRMSE <- HRMSE[!is.na(HRMSE[, 1]), , drop = FALSE]
 
       if(Model == 'atds_mgwr') modelGWR@G = G
       control_tds$model_stage1 <- model_stage1 <- returned_model <- modelGWR
@@ -2048,6 +2077,11 @@ TDS_MGWR <- function(formula, data, coords,
       if(!is.null(control_tds$model_stage1)) {
         HBETA = model_stage1@HBETA
         HRMSE = model_stage1@HRMSE
+        if (!is.null(TRUEBETA) && ncol(HRMSE) != K + 4L) {
+          # stage 1 was run without TRUEBETA: start the history here
+          HRMSE <- matrix(NA_real_, nrow = 0L, ncol = K + 4L)
+          colnames(HRMSE) <- c(paste0('RMSE_', namesX), 'meanRMSE', 'h', 'AICc', 'RMSE')
+        }
         i <- nrow(HRMSE)
         HRMSE <- rbind(HRMSE, matrix(NA, ncol = ncol(HRMSE), nrow = nrounds + 1))
         BETA <- model_stage1@Betav
@@ -2215,7 +2249,7 @@ TDS_MGWR <- function(formula, data, coords,
       modelGWR@ctime <-  (proc.time() - start)[3]
       modelGWR@HBETA <- HBETA
       if(!is.null(TRUEBETA)) {
-        modelGWR@HRMSE <- HRMSE[!is.na(HRMSE[, 1]), ]
+        modelGWR@HRMSE <- HRMSE[!is.na(HRMSE[, 1]), , drop = FALSE]
       }
       if(control_tds$get_AIC) {
         modelGWR@AICc <- AICc

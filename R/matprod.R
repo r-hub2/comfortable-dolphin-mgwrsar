@@ -14,7 +14,7 @@
   if (is.null(.mgwrsar_matprod_env$optimised)) {
     blas <- tryCatch(extSoftVersion()[["BLAS"]], error = function(e) "")
     .mgwrsar_matprod_env$optimised <-
-      grepl("veclib|accelerate|openblas|mkl|blis|atlas|flexiblas", blas,
+      grepl("veclib|accelerate|openblas|mkl|blis|atlas|flexiblas|armpl", blas,
             ignore.case = TRUE)
   }
   .mgwrsar_matprod_env$optimised

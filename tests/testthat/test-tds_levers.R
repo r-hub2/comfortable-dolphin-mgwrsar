@@ -18,6 +18,9 @@
 # - a user-supplied grid V is order-invariant, and first_nn < n does not crash
 # - an adaptive temporal kernel (control$adaptive[2] = TRUE) is searched on a
 #   grid of neighbour counts, mirroring the spatial one
+# - control_tds$TRUEBETA fills the HRMSE slot: one row per kept iteration
+#   (starting model included), the RMSE of each coefficient, their mean, the
+#   AICc and the residual RMSE of that iteration
 # =============================================================================
 
 library(testthat)
@@ -337,4 +340,73 @@ test_that("fully pinned bandwidths iterate the backfitting to its fixed point", 
   g <- suppressWarnings(lev_fit(list(H = lev_H, Ht = lev_Ht, tol = 1e-6,
                                      maxit = 30, init_model = "GWR")))
   expect_lt(max(abs(g@Betav - m@Betav)), 5e-5)
+})
+
+# -----------------------------------------------------------------------------
+# 8. True coefficients: the HRMSE history
+# -----------------------------------------------------------------------------
+
+lev_TB <- cbind(lev_b1, lev_b2, lev_b3, lev_b4)
+lev_beta_rmse <- function(b) unname(sqrt(colMeans((lev_TB - b)^2)))
+lev_check_hrmse <- function(m, K = 4L) {
+  # one row per kept iteration, starting model included
+  expect_identical(nrow(m@HRMSE), length(m@HBETA))
+  expect_identical(colnames(m@HRMSE),
+                   c(paste0("RMSE_", lev_vars), "meanRMSE", "h", "AICc", "RMSE"))
+  expect_false(anyNA(m@HRMSE[, 1:(K + 1)]))
+  # column K + 1 is the mean of the K coefficient RMSE
+  expect_equal(unname(m@HRMSE[, K + 1]), unname(rowMeans(m@HRMSE[, 1:K])))
+  # every row describes the coefficients kept at that iteration, the last one
+  # the returned model
+  for (i in seq_along(m@HBETA)[-1])
+    expect_equal(unname(m@HRMSE[i, 1:K]), lev_beta_rmse(m@HBETA[[i]]), info = i)
+  last <- nrow(m@HRMSE)
+  expect_equal(unname(m@HRMSE[last, 1:K]), lev_beta_rmse(m@Betav))
+  expect_equal(unname(m@HRMSE[last, "RMSE"]), m@RMSE)
+}
+
+test_that("TRUEBETA fills the HRMSE history, one row per kept iteration", {
+  # HRMSE was written in the backfitting loop but never initialized:
+  # "object 'HRMSE' not found"
+  m <- lev_fit(list(H = lev_H, Ht = lev_Ht, get_AIC = TRUE, TRUEBETA = lev_TB))
+  lev_check_hrmse(m)
+  expect_gte(nrow(m@HRMSE), 3)
+  expect_equal(unname(m@HRMSE[nrow(m@HRMSE), "AICc"]), m@AICc)
+  # row 1 is the starting model (OLS)
+  ols <- matrix(coef(lm(Y ~ X2 + X3 + X4, lev_dat)), lev_n, 4, byrow = TRUE)
+  expect_equal(unname(m@HRMSE[1, 1:4]), lev_beta_rmse(ols))
+  expect_true(is.na(m@HRMSE[1, "h"]))
+  # spatial-only model, without AICc, and a data.frame of true coefficients
+  g <- lev_fit(list(H = lev_H, TRUEBETA = as.data.frame(lev_TB)), Type = "GD")
+  lev_check_hrmse(g)
+  expect_true(all(is.na(g@HRMSE[, "AICc"])))
+  expect_true(all(g@HRMSE[-1, "h"] %in% c(g@V, g@H)))
+})
+
+test_that("a malformed TRUEBETA is rejected with an explicit message", {
+  expect_error(lev_fit(list(H = lev_H, Ht = lev_Ht, TRUEBETA = lev_TB[, 1:3])),
+               "one column per coefficient")
+  expect_error(lev_fit(list(H = lev_H, Ht = lev_Ht, TRUEBETA = lev_TB[-1, ])),
+               "one row per observation")
+  expect_error(lev_fit(list(H = lev_H, Ht = lev_Ht,
+                            TRUEBETA = matrix("a", lev_n, 4))),
+               "must be a numeric matrix")
+})
+
+test_that("the HRMSE history follows a free search and the atds boosting", {
+  skip_if_not(nzchar(Sys.getenv("RUN_LONG_TESTS")), "long test")
+  m <- lev_fit(list(get_AIC = TRUE, TRUEBETA = lev_TB))
+  lev_check_hrmse(m)
+  expect_equal(unname(m@HRMSE[nrow(m@HRMSE), "AICc"]), m@AICc)
+  # stage 2 of atds_mgwr appends its rounds to the stage-1 history
+  a <- suppressMessages(TDS_MGWR(
+    formula = Y ~ X2 + X3 + X4, data = lev_dat, coords = lev_co,
+    Model = "atds_mgwr", kernels = "gauss",
+    control_tds = list(nns = 8, get_AIC = TRUE, verbose = FALSE, ncore = 1,
+                       init_model = "OLS", TRUEBETA = lev_TB),
+    control = list(adaptive = TRUE, NN = lev_n, Type = "GD")))
+  expect_gt(nrow(a@HRMSE), 1)
+  expect_false(anyNA(a@HRMSE[, 1:5]))
+  expect_equal(unname(a@HRMSE[, 5]), unname(rowMeans(a@HRMSE[, 1:4])))
+  expect_equal(unname(a@HRMSE[nrow(a@HRMSE), 1:4]), lev_beta_rmse(a@Betav))
 })
