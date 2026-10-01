@@ -143,6 +143,7 @@ prep_d<-function (coords, NN, TP, Q = FALSE, extrapol = FALSE, ratio = 1,
       dt <- dt%%cycling
       pmin(dt, cycling - dt)
     }
+    rng_state <- .mgwrsar_rng_save(); on.exit(.mgwrsar_rng_restore(rng_state), add = TRUE)
     set.seed(seed)
     idx <- sample(TRAIN, min(subsample, length(TRAIN)))
     DS_samp <- as.vector(dist(coords[idx, , drop = FALSE]))

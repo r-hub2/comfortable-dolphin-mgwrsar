@@ -16,10 +16,16 @@ prep_w<-function(H,kernels,Type='GD',adaptive=FALSE,dists=NULL,indexG=NULL,alpha
   #   x_mod[x_mod == 0] <- cycling
   #   pmin(x_mod, cycling - x_mod)
   # }
+  # An adaptive bandwidth is a number of neighbours. The compact kernels read
+  # the (H + 2)-th sorted distance as bandwidth (rectangle: the (H + 1)-th), so
+  # H is capped where that column exists; it used to be capped at the number
+  # of columns, one or two short, hence an index error for H close to NN.
+  adapt_cap <- function(kernel, ncol_d)
+    ncol_d - switch(sub("_.*$", "", kernel), bisq = , epane = , tcub = , triangle = 2L, rectangle = 1L, 0L)
   if(adaptive[1]) {
     H[1]=round(H[1])
+    H[1] <- min(H[1], adapt_cap(kernels[1], ncol(indexG)))
     kernels[1]= paste0(kernels[1],'_adapt_sorted')
-    if(H[1]>ncol(indexG)) H[1]<-ncol(indexG)
   }
 
   # Normalised kernel matrices are memoised per (distance matrix, kernel,
@@ -49,14 +55,20 @@ prep_w<-function(H,kernels,Type='GD',adaptive=FALSE,dists=NULL,indexG=NULL,alpha
     kernels_t<-unlist(str_split(kernels, '_'))[1]
     # suffix the base kernel name: `kernels` already carries '_adapt_sorted' from
     # the block above (and possibly a '_past' / cycling format suffix)
-    if(adaptive[1])  kernels_t= paste0(kernels_t,'_adapt_sorted')
+    if(adaptive[1]) {
+      H[1] <- min(round(H[1]), adapt_cap(kernels_t, ncol(dists[['dist_t']])))
+      kernels_t= paste0(kernels_t,'_adapt_sorted')
+    }
     format_t<-unlist(str_split(kernels, '_'))[2]
     #cycling<-as.numeric(unlist(str_split(kernels, '_'))[3])
     Wd=temporal_w(kernels_t, format_t, H[1], 2L)
   } else if(Type=='GDT') {
     Wd=spatial_w(1L)
     kernels_t<-unlist(str_split(kernels[2], '_'))[1]
-    if(adaptive[2])  kernels_t= paste0(kernels_t,'_adapt_sorted')
+    if(adaptive[2]) {
+      H[2] <- min(round(H[2]), adapt_cap(kernels_t, ncol(dists[['dist_t']])))
+      kernels_t= paste0(kernels_t,'_adapt_sorted')
+    }
     format_t<-unlist(str_split(kernels[2], '_'))[2] ## in control ?
     wt=temporal_w(kernels_t, format_t, H[2], 1L)
     if (alpha == 1) {

@@ -110,6 +110,7 @@ multiscale_gwr <- function(formula, data, coords, kernels = 'bisq', control_mgwr
   if(verbose) cat("GWR estimation as starting Model \n")
 
 
+  rng_state <- .mgwrsar_rng_save(); on.exit(.mgwrsar_rng_restore(rng_state), add = TRUE)
   if (!('indexG' %in% names(control))) {
     while (sum(duplicated(coords)) > 0) {
       set.seed(123, kind = "L'Ecuyer-CMRG", normal.kind = "Inversion")

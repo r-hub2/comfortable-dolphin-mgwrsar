@@ -26,6 +26,22 @@ static inline arma::uword eff_rank_from_R(const arma::mat& R) {
   return r;
 }
 
+// Apply Q' = H_r ... H_1 (the first r Householder reflectors of a LAPACK QR
+// factorisation held in A and tau: v_k(k) = 1, v_k(i > k) = A(i, k)) to x.
+// Used for Q'y and for the focal row of Q (Q' e_f) without forming Q.
+static inline void apply_qt(const arma::mat& A, const arma::vec& tau,
+                            const arma::uword r, arma::vec& x) {
+  const arma::uword m = A.n_rows;
+  for (arma::uword k = 0; k < r; ++k) {
+    const double* vk = A.colptr(k);
+    double s = x[k];
+    for (arma::uword i = k + 1; i < m; ++i) s += vk[i] * x[i];
+    s *= tau[k];
+    x[k] -= s;
+    for (arma::uword i = k + 1; i < m; ++i) x[i] -= s * vk[i];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Neighbour layout and stderr silencing shared by the GWR cores
 // ---------------------------------------------------------------------------
@@ -163,9 +179,16 @@ Rcpp::List gwr_beta_univar_cpp(const Rcpp::NumericVector& y,
 // ---------------------------------------------------------------------------
 
 // Xt is X transposed (p x n): the covariates of one observation are contiguous.
-// Buffers are allocated once outside the loop. Without Shat/Rk, Q is never
-// formed (geqrf + reflectors applied to y) and the focal hat element TS comes
-// from two triangular solves on R.
+// Buffers are allocated once outside the loop. Each local system is solved by
+// a column-pivoted Householder QR (LAPACK geqp3): the diagonal of R is then
+// non-increasing, so the rank is read reliably and the non-estimable columns
+// are the pivoted ones beyond the rank, whatever their position in the
+// formula. Hat quantities use Q only: with Xw_r = Q_r Rr and x_f the focal
+// row, S(f, j) = (sw_j / sw_f) q_f' q_j and s_ff = ||q_f||^2, which stays in
+// [0, 1] even when the local system is nearly singular (R^{-1} is used only
+// for the coefficients, their standard errors and the per-coefficient
+// operator Rk). Without Shat/Rk, Q is never formed: Q'y and q_f come from the
+// reflectors.
 Rcpp::List gwr_beta_pivotal_qrp_core(
     const arma::mat& Xt,
     const arma::vec& y,
@@ -195,14 +218,16 @@ Rcpp::List gwr_beta_pivotal_qrp_core(
 
   std::vector<uword> rows(NN);
   std::vector<double> sw(NN);
-  mat Xw, Q, R, A;
+  mat Xw, R, A;
   vec yw;
   std::stringstream sink;
 
-  // Q is formed only when the hat rows (Shat) or Rk are requested
+  // Q_r is formed (orgqr) only when the hat rows (Shat) or Rk are requested
   const bool need_Q = get_s || get_Rk;
   vec tau(std::max<uword>(p, 1u));
-  vec work(std::max<uword>(64u * p, 1u));   // geqrf workspace (>= p; unblocked for small p)
+  vec work(std::max<uword>(64u * p, 4u));   // geqp3 needs >= 3p + 1, orgqr >= r
+  std::vector<blas_int> jpvt(std::max<uword>(p, 1u));
+  std::vector<uword> perm(std::max<uword>(p, 1u));
 
   // ---- loop over focal points
   for (uword z = 0; z < nTP; ++z) {
@@ -232,40 +257,23 @@ Rcpp::List gwr_beta_pivotal_qrp_core(
       yw[j] = y[rows[j]] * sw[j];
     }
 
-    uword r;
-    mat Rr;
-    vec Qt_y;
-    if (need_Q) {
-      try { qr_econ(Q, R, Xw); } catch (...) { continue; }
-      r = eff_rank_from_R(R);
-      if (r == 0u) continue;
-      Rr = R.submat(0, 0, r - 1, r - 1);
-      Qt_y = Q.t() * yw;
-    } else {
-      // Householder QR without forming Q (forming it costs as much as the
-      // factorisation): R comes from LAPACK geqrf like in qr_econ, and Q'y is
-      // obtained by applying the first r reflectors H_k = I - tau_k v_k v_k'
-      // (v_k(k) = 1, v_k(i > k) = A(i, k)) to yw.
-      A = Xw;
-      blas_int m_i = blas_int(n_loc), p_i = blas_int(p), lda = blas_int(n_loc);
-      blas_int lwork_i = blas_int(work.n_elem), info = 0;
-      lapack::geqrf(&m_i, &p_i, A.memptr(), &lda, tau.memptr(), work.memptr(), &lwork_i, &info);
-      if (info != 0) continue;
-      R = trimatu(A.rows(0, p - 1));
-      r = eff_rank_from_R(R);
-      if (r == 0u) continue;
-      Rr = R.submat(0, 0, r - 1, r - 1);
-      Qt_y = yw;
-      for (uword k = 0; k < r; ++k) {
-        const double* vk = A.colptr(k);
-        double s = Qt_y[k];
-        for (uword i = k + 1; i < n_loc; ++i) s += vk[i] * Qt_y[i];
-        s *= tau[k];
-        Qt_y[k] -= s;
-        for (uword i = k + 1; i < n_loc; ++i) Qt_y[i] -= s * vk[i];
-      }
-    }
+    // ---- column-pivoted QR of Xw: Xw P = Q R
+    A = Xw;
+    blas_int m_i = blas_int(n_loc), p_i = blas_int(p), lda = blas_int(n_loc);
+    blas_int lwork_i = blas_int(work.n_elem), info = 0;
+    for (uword c = 0; c < p; ++c) jpvt[c] = 0;
+    lapack::geqp3(&m_i, &p_i, A.memptr(), &lda, jpvt.data(), tau.memptr(),
+                  work.memptr(), &lwork_i, &info);
+    if (info != 0) continue;
+    R = trimatu(A.rows(0, p - 1));
+    const uword r = eff_rank_from_R(R);
+    if (r == 0u) continue;
+    const mat Rr = R.submat(0, 0, r - 1, r - 1);
+    for (uword c = 0; c < p; ++c) perm[c] = uword(jpvt[c]) - 1u;
 
+    // ---- coefficients: Rr beta_r = Q_r' y, zeros on the non-estimable columns
+    vec Qt_y = yw;
+    apply_qt(A, tau, r, Qt_y);
     vec beta_r;
     try {
       RcerrSilencer quiet(sink.rdbuf());
@@ -273,109 +281,80 @@ Rcpp::List gwr_beta_pivotal_qrp_core(
     } catch (...) {
       continue;
     }
-
-    // expand to full p with zeros on non-estimable columns
     vec beta(p, fill::zeros);
-    beta.head(r) = beta_r;
+    for (uword k = 0; k < r; ++k) beta[perm[k]] = beta_r[k];
     Betav.row(z) = beta.t();
 
     // ---- local standard errors (only if requested)
     if (get_se) {
       vec sev_full(p, fill::zeros);
-
       try {
-        // local fitted values and weighted residuals
-        vec yhat_w = Xw.cols(0, r - 1) * beta_r; // because columns beyond r are zero
-        vec resid_w = yw - yhat_w;
-
-        double rss_w = dot(resid_w, resid_w);
-        double denom = std::max(1.0, double(n_loc) - double(r));
-        double sigma2 = rss_w / denom;
-
-        mat Rinverse = inv(trimatu(Rr));        // r x r
-        mat XtXinv_r = Rinverse * Rinverse.t(); // r x r
-
-        vec sev_loc = sqrt(sigma2 * XtXinv_r.diag());
-
-        for (uword j = 0; j < r; ++j) {
-          double v = sev_loc[j];
-          sev_full[j] = (std::isfinite(v) ? v : 0.0);
+        vec yhat_w(n_loc, fill::zeros);
+        for (uword k = 0; k < r; ++k) yhat_w += Xw.col(perm[k]) * beta_r[k];
+        const vec resid_w = yw - yhat_w;
+        const double sigma2 = dot(resid_w, resid_w) /
+          std::max(1.0, double(n_loc) - double(r));
+        const mat Rinverse = inv(trimatu(Rr));            // r x r
+        const vec sev_loc = sqrt(sigma2 * sum(square(Rinverse), 1)); // diag(Rinv Rinv')
+        for (uword k = 0; k < r; ++k) {
+          const double v = sev_loc[k];
+          sev_full[perm[k]] = (std::isfinite(v) ? v : 0.0);
         }
       } catch (...) {
         // keep zeros (legacy behavior)
       }
-
       SEV.row(z) = sev_full.t();
     }
 
-    // ---- TS only: focal hat element. With Xw_r = Q_r Rr, Q_r(f, .) =
-    // sw_f x_f,r' Rr^{-1}, so s_ff = sw_f^2 (Rr^{-T} x0_r)' (Rr^{-T} x_f,r).
-    if (get_ts && !need_Q) {
-      const uword focal_id = TP[z] - 1u;
-      uword jf = n_loc;
-      for (uword jj = 0; jj < n_loc; ++jj)
-        if (rows[jj] == focal_id) { jf = jj; break; }
-      if (jf == n_loc) continue;
+    // ---- hat quantities at the focal point
+    const uword focal_id = TP[z] - 1u;
+    uword jf = n_loc;
+    for (uword jj = 0; jj < n_loc; ++jj)
+      if (rows[jj] == focal_id) { jf = jj; break; }
+    if (jf == n_loc) continue;   // the focal point is not among its neighbours
 
-      const vec x0r = XV.row(focal_id).head(r).t();
-      const vec xfr = Xt.col(focal_id).head(r);
-      vec u, v;
-      try {
-        RcerrSilencer quiet(sink.rdbuf());
-        u = solve(trimatl(Rr.t()), x0r, solve_opts::fast);
-        v = solve(trimatl(Rr.t()), xfr, solve_opts::fast);
-      } catch (...) {
-        continue;
+    if (!need_Q) {
+      if (get_ts) {
+        // s_ff = ||q_f||^2 with q_f = (Q' e_f)(1:r), from the reflectors
+        vec qf(n_loc, fill::zeros);
+        qf[jf] = 1.0;
+        apply_qt(A, tau, r, qf);
+        TS[z] = dot(qf.head(r), qf.head(r));
       }
-      TS[z] = (sw[jf] * sw[jf]) * dot(u, v);
+      continue;
     }
 
-    // ---- TS / Shat / Rk (hat-related outputs)
-    if (get_s || get_Rk) {
+    // Q_r formed in place in the first r columns of A
+    blas_int r_i = blas_int(r);
+    lapack::orgqr(&m_i, &r_i, &r_i, A.memptr(), &lda, tau.memptr(),
+                  work.memptr(), &lwork_i, &info);
+    if (info != 0) continue;
+    const mat Qr = A.cols(0, r - 1);
+    const vec qf = Qr.row(jf).t();
+    vec s_local = Qr * qf;                       // q_f' q_j for every neighbour
+    for (uword j = 0; j < n_loc; ++j) s_local[j] *= sw[j] / sw[jf];
 
-      const rowvec x0 = XV.row(TP[z] - 1u);
-      mat QrT = Q.cols(0, r - 1).t();
+    if (get_ts) TS[z] = s_local[jf];
+    if (get_s)
+      for (uword j = 0; j < n_loc; ++j) Shat(z, rows[j]) = s_local[j];
+
+    if (get_Rk) {
+      // per-coefficient operator: B = P [Rr^{-1} Q_r'; 0], Rk(f, j, nx) = x_f[nx] B(nx, j) sw_j
       mat Br;
-
       try {
         RcerrSilencer quiet(sink.rdbuf());
-        Br = solve(trimatu(Rr), QrT, solve_opts::fast);
+        Br = solve(trimatu(Rr), Qr.t(), solve_opts::fast);   // r x n_loc
       } catch (...) {
         continue;
       }
-
-      mat B(p, n_loc, fill::zeros);
-      B.rows(0, r - 1) = Br;
-
-      vec u = (x0 * B).t();
-      vec s_local(n_loc);
-      for (uword j = 0; j < n_loc; ++j) s_local[j] = sw[j] * u[j];
-
-
-      if (get_ts && s_local.n_elem > 0) {
-        uword focal_id = TP[z] - 1u;
-        TS[z] = 0.0;
-        for (uword jj = 0; jj < n_loc; jj++) {
-          if (rows[jj] == focal_id) {
-            TS[z] = s_local[jj];
-            break;
-          }
-        }
-      }
-
-      if (get_s)
+      const rowvec x0 = XV.row(focal_id);
+      const uword focal = focal_id;
+      for (uword k = 0; k < r; ++k) {
+        const uword nx = perm[k];
+        const double x0nx = x0[nx];
+        if (std::isnan(x0nx)) continue;
         for (uword j = 0; j < n_loc; ++j)
-          Shat(z, rows[j]) = s_local[j];
-
-      if (get_Rk) {
-        const uword focal = TP[z] - 1u;
-        for (uword nx = 0; nx < p; ++nx) {
-          double x0nx = x0[nx];
-          if (!std::isnan(x0nx)) {
-            for (uword j = 0; j < n_loc; ++j)
-              Rk(focal, rows[j], nx) = x0nx * B(nx, j) * sw[j];
-          }
-        }
+          Rk(focal, rows[j], nx) = x0nx * Br(k, j) * sw[j];
       }
     }
   }
@@ -452,8 +431,13 @@ Rcpp::List mgwr_beta_pivotal_qrp_mixed_core_new(
 
   std::vector<arma::uword> rows(NN);
   std::vector<double> sw(NN);
-  arma::mat Xw, XCw, Q, R;
+  arma::mat Xw, XCw, R, A;
   arma::vec yw;
+  std::stringstream sink;
+  arma::vec tau(std::max<arma::uword>(kv, 1u));
+  arma::vec work(std::max<arma::uword>(64u * kv, 4u));
+  std::vector<blas_int> jpvt(std::max<arma::uword>(kv, 1u));
+  std::vector<arma::uword> perm(std::max<arma::uword>(kv, 1u));
 
   // --------------------------------------------------------------------------
   // Local loop: estimate SY (variable part) and XCw_cube (for partialling-out),
@@ -488,83 +472,70 @@ Rcpp::List mgwr_beta_pivotal_qrp_mixed_core_new(
       yw[j] = y[rows[j]] * s;
     }
 
-    arma::qr_econ(Q, R, Xw);
-    
-    arma::uword r = eff_rank_from_R(R);
+    // ---- column-pivoted QR of Xw (see gwr_beta_pivotal_qrp_core), Q_r formed
+    A = Xw;
+    blas_int m_i = blas_int(nl), p_i = blas_int(kv), lda = blas_int(nl);
+    blas_int lwork_i = blas_int(work.n_elem), info = 0;
+    for (arma::uword c = 0; c < kv; ++c) jpvt[c] = 0;
+    arma::lapack::geqp3(&m_i, &p_i, A.memptr(), &lda, jpvt.data(), tau.memptr(),
+                        work.memptr(), &lwork_i, &info);
+    if (info != 0) continue;
+    R = arma::trimatu(A.rows(0, kv - 1));
+    const arma::uword r = eff_rank_from_R(R);
     if (r == 0) continue;
-    
-    arma::mat Rr = R.submat(0, 0, r-1, r-1);
-    arma::vec Qt_y = Q.t() * yw;
-    
-    // Local beta for variable part (in QR basis, then padded to kv)
-    arma::vec br = arma::solve(arma::trimatu(Rr), Qt_y.head(r), arma::solve_opts::fast);
+    const arma::mat Rr = R.submat(0, 0, r - 1, r - 1);
+    for (arma::uword c = 0; c < kv; ++c) perm[c] = arma::uword(jpvt[c]) - 1u;
+    blas_int r_i = blas_int(r);
+    arma::lapack::orgqr(&m_i, &r_i, &r_i, A.memptr(), &lda, tau.memptr(),
+                        work.memptr(), &lwork_i, &info);
+    if (info != 0) continue;
+    const arma::mat Qr = A.cols(0, r - 1);               // nl x r
+
+    // Local beta for variable part (pivoted basis, then back to the kv columns)
+    const arma::vec Qt_y = Qr.t() * yw;
+    arma::vec br;
+    try {
+      RcerrSilencer quiet(sink.rdbuf());
+      br = arma::solve(arma::trimatu(Rr), Qt_y, arma::solve_opts::fast);
+    } catch (...) {
+      continue;
+    }
     arma::vec bSY(kv, arma::fill::zeros);
-    bSY.head(r) = br;
+    for (arma::uword k = 0; k < r; ++k) bSY[perm[k]] = br[k];
     SY.row(z) = bSY.t();
-    
+
     // Local mapping for XC (needed for ZXc = XC - XV * XCwi)
-    arma::mat Qt_Xc = Q.t() * XCw;
-    arma::mat XCw_r = arma::solve(arma::trimatu(Rr), Qt_Xc.rows(0, r-1), arma::solve_opts::fast);
-    XCw_cube.slice(z).rows(0, r-1) = XCw_r;
+    const arma::mat Qt_Xc = Qr.t() * XCw;
+    const arma::mat XCw_r = arma::solve(arma::trimatu(Rr), Qt_Xc, arma::solve_opts::fast);
+    for (arma::uword k = 0; k < r; ++k) XCw_cube.slice(z).row(perm[k]) = XCw_r.row(k);
 
     if (get_se) {
       // Local sigma^2 and SE for variable coefficients (approx local)
-      arma::vec yhat_local = Xw.cols(0, r-1) * br;
-      arma::vec res_local  = yw - yhat_local;
-      double sigma2_local  = arma::dot(res_local, res_local) /
+      arma::vec yhat_local(nl, arma::fill::zeros);
+      for (arma::uword k = 0; k < r; ++k) yhat_local += Xw.col(perm[k]) * br[k];
+      const arma::vec res_local = yw - yhat_local;
+      const double sigma2_local = arma::dot(res_local, res_local) /
         std::max(1.0, double(nl) - double(r));
-      
-      arma::mat Rinverse = arma::inv(arma::trimatu(Rr));
-      arma::vec sev_loc  = arma::sqrt( arma::diagvec(Rinverse * Rinverse.t()) * sigma2_local );
-      
+      const arma::mat Rinverse = arma::inv(arma::trimatu(Rr));
+      const arma::vec sev_loc = arma::sqrt(arma::sum(arma::square(Rinverse), 1) * sigma2_local);
       arma::vec sev_full(kv, arma::fill::zeros);
-      sev_full.head(r) = sev_loc.head(r);
+      for (arma::uword k = 0; k < r; ++k) sev_full[perm[k]] = sev_loc[k];
       SEV.row(z) = sev_full.t();
     }
-    
-    // diag(Sv) only: s_ff = sw_f * x0_r' Rr^{-1} Q(f, 0:r-1)'
-    if (!get_s && (get_ts || get_Rk)) {
+
+    // Variable-part hat operator Sv at the focal point: S(f, j) = (sw_j / sw_f) q_f' q_j
+    if (get_ts || get_Rk || get_s) {
       const arma::uword focal_id = TP[z] - 1u;
       arma::uword jf = nl;
       for (arma::uword jj = 0; jj < nl; jj++)
         if (rows[jj] == focal_id) { jf = jj; break; }
       if (jf < nl) {
-        arma::rowvec x0 = XV.row(focal_id);
-        arma::vec bf = arma::solve(arma::trimatu(Rr), Q.submat(jf, 0, jf, r-1).t(),
-                                   arma::solve_opts::fast);
-        TS[z] = sw[jf] * arma::dot(x0.head(r), bf);
-      }
-    }
-
-    // Variable-part hat operator Sv at focal point
-    if (get_s) {
-
-      arma::rowvec x0 = XV.row(TP[z] - 1u);
-
-      arma::mat Q_sub = Q.cols(0, r-1);
-      arma::mat Br    = arma::solve(arma::trimatu(Rr), Q_sub.t(), arma::solve_opts::fast);
-
-      arma::mat B(kv, nl, arma::fill::zeros);
-      B.rows(0, r-1) = Br;
-
-      arma::vec u = (x0 * B).t();
-      arma::vec s(nl); // hat row weights at location z, restricted to "rows"
-      for (arma::uword j=0; j<nl; j++) s[j] = sw[j] * u[j];
-
-      if (s.n_elem > 0) {
-        arma::uword focal_id = TP[z] - 1u;
-        for (arma::uword jj = 0; jj < nl; jj++) {
-          if (rows[jj] == focal_id) {
-            TS[z] = s[jj]; // diag(Sv) at focal
-            break;
-          }
-        }
-      }
-      
-      if (get_s) {
-        for (arma::uword j=0; j<nl; j++) {
-          Shat(z, rows[j]) = s[j];
-        }
+        const arma::vec qf = Qr.row(jf).t();
+        arma::vec s = Qr * qf;
+        for (arma::uword j = 0; j < nl; j++) s[j] *= sw[j] / sw[jf];
+        TS[z] = s[jf];                                   // diag(Sv) at focal = ||q_f||^2
+        if (get_s)
+          for (arma::uword j = 0; j < nl; j++) Shat(z, rows[j]) = s[j];
       }
     }
   }
@@ -593,6 +564,17 @@ Rcpp::List mgwr_beta_pivotal_qrp_mixed_core_new(
   // beta_c on Z
   arma::mat XtX = ZXc.t() * ZXc;
   arma::vec Xty = ZXc.t() * ZY;
+  // the constant coefficients are identified by Z = (I - Sv) XC: a fixed
+  // variable that is constant, duplicated or carried by the varying part
+  // leaves Z'Z singular, and the former solve() returned huge coefficients
+  bool absorbed = false;
+  for (arma::uword c = 0; c < kc; ++c) {
+    double z2 = 0.0, x2 = 0.0;
+    for (arma::uword z = 0; z < nTP; ++z) { z2 += ZXc(z, c) * ZXc(z, c); x2 += XC(TP[z] - 1u, c) * XC(TP[z] - 1u, c); }
+    if (!(z2 > 1e-10 * x2)) absorbed = true;   // the varying part reproduces this fixed column
+  }
+  if (absorbed || !XtX.is_finite() || arma::rcond(arma::symmatu(XtX)) < 1e-12)
+    Rcpp::stop("the constant coefficients (fixed_vars) are not identifiable: after removing the varying part, their design is singular (a fixed variable is constant, duplicated, or collinear with the varying coefficients).");
   
   arma::vec beta_c;
   {

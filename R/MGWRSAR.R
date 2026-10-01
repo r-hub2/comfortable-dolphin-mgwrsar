@@ -130,6 +130,7 @@
 #'  summary(mgwrsar_0_kc_kv)
 #' }
 MGWRSAR <- function(formula, data, coords, fixed_vars = NULL, kernels, H,Model = "GWR", control = list()){
+  rng_state <- .mgwrsar_rng_save(); on.exit(.mgwrsar_rng_restore(rng_state), add = TRUE)
   set.seed(123, kind = "L'Ecuyer-CMRG", normal.kind = "Inversion")
   coords_o<-coords
 
@@ -139,6 +140,7 @@ MGWRSAR <- function(formula, data, coords, fixed_vars = NULL, kernels, H,Model =
   mf <- model.frame(formula, data)
   data<-data[,names(mf)]
   if(is.null(control$Type)) control$Type='GD'
+  .mgwrsar_check_inputs(data, coords, kernels, H, Model, control, n = nrow(data))
   if(Model!='OLS'){
   if(control$Type %in% c('GD','GDT')) coords<-make_unique_by_structure(coords)
   if(control$Type %in% c('GDT','T')) control$Z<-make_unique_by_structure(control$Z)
@@ -173,6 +175,15 @@ MGWRSAR <- function(formula, data, coords, fixed_vars = NULL, kernels, H,Model =
       if (is.na(NN) || NN < 1L) NN <- n
       NN <- min(NN, n)
     }
+    # an adaptive bandwidth is a number of neighbours: it cannot exceed the
+    # sample (the kernels read the (H + 1)-th or (H + 2)-th neighbour and
+    # failed with an index error)
+    if (!isTRUE(get0("searchB", inherits = FALSE)) && !is.null(H) && length(adaptive) >= 1L) {
+      ad <- rep_len(as.logical(adaptive), length(H))
+      if (any(ad & !is.na(H) & H > n))
+        stop(sprintf("adaptive bandwidth H = %s is a number of neighbours and exceeds the sample size n = %d.",
+                     paste(H[ad & !is.na(H) & H > n], collapse = ", "), n), call. = FALSE)
+    }
     if(is.null(control$family)){
       control$family<-family<-gaussian(link = "identity")
     }
@@ -203,6 +214,10 @@ MGWRSAR <- function(formula, data, coords, fixed_vars = NULL, kernels, H,Model =
       model$XV = NULL
     }
     else if (Model == "SAR") {
+      qrX <- qr(X)
+      if (qrX$rank < ncol(X))
+        stop(sprintf("%s fully collinear, remove these terms from the formula.",
+                     paste(colnames(X)[qrX$pivot[-seq_len(qrX$rank)]], collapse = ", ")), call. = FALSE)
       model<-list()
       if (Method %in% c("B2SLS", "2SLS")) {
         keep = which(!is.na(coefficients(lm.fit(X, Y))))

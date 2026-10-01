@@ -114,6 +114,9 @@ TDS_MGWR <- function(formula, data, coords,
     # ----------------------------------------------------------
     # [1] Spatial range
     # ----------------------------------------------------------
+    # the sub-samples of distances below are drawn from the package generator
+    rng_state <- .mgwrsar_rng_save(); on.exit(.mgwrsar_rng_restore(rng_state), add = TRUE)
+    set.seed(123, kind = "L'Ecuyer-CMRG", normal.kind = "Inversion")
     if (isTRUE(adaptive["spatial"])) {
       # adaptive = TRUE -> bounds in number of neighbors
       hs_range <- c(K + 2, n)
@@ -132,6 +135,8 @@ TDS_MGWR <- function(formula, data, coords,
     # [2] Temporal range (if applicable)
     # ----------------------------------------------------------
     if (!is.null(time)) {
+      if (length(unique(time[!is.na(time)])) < 2L)
+        stop("`control$Z` (time) takes a single value: a space-time model needs temporal variation; use Type = 'GD'.", call. = FALSE)
       cycling <- as.numeric(unlist(stringr::str_split(tail(kernels,1), "_"))[3])
       if (isTRUE(adaptive["temporal"])) {
         ht_range <- c(K + 2, n)
@@ -211,6 +216,9 @@ TDS_MGWR <- function(formula, data, coords,
         stop('Only atds_gwr, tds_mgwr and atds_mgwr Model can be estimated using Top Down Scale approach in this release.')
 
       n_time <- m <- n <- nrow(data)
+      if (identical(control$Type, "GDT") && !is.null(control$Z) &&
+          length(unique(control$Z[!is.na(control$Z)])) < 2L)
+        stop("`control$Z` (time) takes a single value: a space-time model needs temporal variation; use Type = 'GD'.", call. = FALSE)
 
       # ============================================================
       # [2] INITIALIZATION OF TDS PARAMETERS
@@ -1172,7 +1180,9 @@ TDS_MGWR <- function(formula, data, coords,
           myAICc = model0@AIC
           H = model0@H
           if (control$Type == 'GDT') {
-            Ht <- model0@Ht <- rep(max_dist_t,length(H))
+            # named like H: predict() reads the temporal bandwidths by coefficient name
+            Ht <- rep(max_dist_t, length(H)); names(Ht) <- namesX
+            model0@Ht <- Ht
           }
         }
 
@@ -1498,20 +1508,14 @@ TDS_MGWR <- function(formula, data, coords,
         # 3.1 Iteration bookkeeping
         # ------------------------------------------------------------
         last_rmseG = rmse
-        if (!identical(BETA, bestBETA)) {
-          # The previous sweep was rejected: restart from the best state with
-          # the residuals and smoother trace that produced it. Otherwise the
-          # first coefficient of this sweep is fitted on a partial residual
-          # mixing the rejected fit with the best coefficients.
-          BETA = bestBETA
-          fit = rowSums(BETA * X)
-          data$e0 = Y - fit
-          rmse = sqrt(mean(data$e0^2))
-          if (control_tds$get_AIC) {
-            S = mybestS
-            Rk = mybestRk
-          }
-        }
+        # A rejected sweep is kept as the current state: a sweep is
+        # deterministic, so restarting from the best state (coefficients,
+        # residuals and smoother trace) would repeat the rejected sweep and
+        # freeze the descent, whereas continuing from the rejected state lets
+        # it find a better region (non-monotone descent). The best state
+        # (bestBETA, H, Ht, mybestS, mybestRk) is the one returned. Until 1.3.2
+        # the coefficients were reset but not the residuals, an inconsistent
+        # state that happened to have the same effect.
         if (verbose) cat('\n\n ', i)
 
         if (control_tds$get_AIC) {

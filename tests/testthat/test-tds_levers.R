@@ -313,18 +313,22 @@ lev_X <- cbind(1, as.matrix(lev_dat[, c("X2", "X3", "X4")]))
 lev_rmse_path <- function(m)
   vapply(m@HBETA[-1], function(b) sqrt(mean((lev_dat$Y - rowSums(b * lev_X))^2)), 0)
 
-test_that("a rejected sweep restarts from a consistent state", {
-  # BETA was reset to the best sweep but the residuals stayed those of the
-  # rejected one: the sweeps following a rejection were all different, and a
-  # criterion read at pinned bandwidths jittered from one iteration to the next
+test_that("the descent continues after a rejected sweep and returns the best one", {
+  # Restarting from the best state after a rejection repeated the rejected
+  # sweep (a sweep is deterministic) and froze the descent; 1.3.2 restarted
+  # from an inconsistent state. The descent now continues from the rejected
+  # state: later sweeps differ from the rejected one, kept sweeps are the
+  # running minima of the RMSE path, and the returned model is the best sweep.
   out <- capture.output(m <- lev_fit(list(Ht = lev_Ht, verbose = TRUE)))
   ln <- grep("rmse = ", out, value = TRUE)
-  rm_sweep <- sub(".*rmse = ([0-9.]+).*", "\\1", ln)
+  rm_sweep <- as.numeric(sub(".*rmse = ([0-9.]+).*", "\\1", ln))
   kept <- grepl("\\*$", ln)
-  after_best <- rm_sweep[-seq_len(max(which(kept)))]
-  expect_gte(length(after_best), 2)
-  expect_length(unique(after_best), 1)
-  expect_equal(m@RMSE, as.numeric(rm_sweep[max(which(kept))]), tolerance = 1e-6)
+  rejected <- which(!kept)
+  expect_gte(length(rejected), 1)
+  for (r in rejected[rejected < length(rm_sweep)])
+    expect_false(isTRUE(all.equal(rm_sweep[r + 1], rm_sweep[r])), info = r)
+  expect_equal(rm_sweep[kept], cummin(rm_sweep)[kept])
+  expect_equal(m@RMSE, min(rm_sweep), tolerance = 1e-6)
 })
 
 test_that("fully pinned bandwidths iterate the backfitting to its fixed point", {
@@ -409,4 +413,53 @@ test_that("the HRMSE history follows a free search and the atds boosting", {
   expect_false(anyNA(a@HRMSE[, 1:5]))
   expect_equal(unname(a@HRMSE[, 5]), unname(rowMeans(a@HRMSE[, 1:4])))
   expect_equal(unname(a@HRMSE[nrow(a@HRMSE), 1:4]), lev_beta_rmse(a@Betav))
+})
+
+# -----------------------------------------------------------------------------
+# 9. predict() with a temporal bandwidth stored as a single unnamed value
+# -----------------------------------------------------------------------------
+# When no sweep is kept, or when the starting model comes from a nested
+# TDS_MGWR() call, Ht could be a scalar or an unnamed vector; predict() reads
+# the temporal bandwidths by coefficient name and failed. The prediction must
+# be the same as with the named vector (bug report of 2026-10-01, annex).
+
+test_that("predict() accepts a scalar or unnamed Ht", {
+  skip_if_not(nzchar(Sys.getenv("RUN_LONG_TESTS")), "long test")
+  m <- lev_fit(list(H = lev_H, Ht = rep(90, 4)))
+  expect_named(m@Ht, lev_vars)
+  new <- 1:25
+  nc <- cbind(lev_co[new, ], lev_day[new]); colnames(nc) <- c("X", "Y", "time")
+  p_named <- predict(m, newdata = lev_dat[new, ], newdata_coords = nc,
+                     method_pred = "model", beta_proj = TRUE, exposant = 8)$Y_predicted
+  m_scalar <- m; m_scalar@Ht <- 90
+  m_unnamed <- m; m_unnamed@Ht <- unname(m@Ht)
+  for (mm in list(m_scalar, m_unnamed)) {
+    p <- predict(mm, newdata = lev_dat[new, ], newdata_coords = nc,
+                 method_pred = "model", beta_proj = TRUE, exposant = 8)$Y_predicted
+    expect_equal(p, p_named)
+  }
+})
+
+# -----------------------------------------------------------------------------
+# 10. Non-monotone descent after a rejected sweep (bug report of 2026-10-01)
+# -----------------------------------------------------------------------------
+# Repeated locations, correlated predictors, gaussian space-time kernels with
+# fixed bandwidths: sweep 18 is rejected. Restarting from the best state
+# repeated it and returned the state of sweep 17 (RMSE 0.5362); continuing
+# from the rejected state finds a smaller spatial bandwidth for the intercept
+# and converges to RMSE 0.5288, the solution of 1.3.2.
+
+test_that("the descent escapes a rejected sweep (coauthor's seed 5)", {
+  skip_if_not(nzchar(Sys.getenv("RUN_LONG_TESTS")), "long test")
+  source('../../tools/singular_cases.R', local = TRUE)
+  d <- singular_data_sites(seed = 5)
+  m <- suppressMessages(suppressWarnings(TDS_MGWR(
+    formula = Y ~ F1 + F2 + F3, Model = "tds_mgwr", data = d,
+    coords = as.matrix(d[, c("x", "y")]), kernels = c("gauss", "gauss"),
+    fixed_vars = NULL,
+    control_tds = list(nns = 25, verbose = FALSE, tol = 1e-4, init_model = "OLS"),
+    control = list(Z = d$time, NN = nrow(d), adaptive = c(FALSE, FALSE),
+                   Type = "GDT", ncore = 1))))
+  expect_equal(unname(round(m@H)), c(40155, 35947, 410504, 410504))
+  expect_lt(sqrt(mean((d$Y - m@fit)^2)), 0.530)
 })
