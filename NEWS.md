@@ -1,5 +1,12 @@
 NEWS/ChangeLog
 -----------------------------
+# 1.4.2 2026-10-06
+
+Bug fix
+	•	`TDS_MGWR()` with pinned bandwidths (`control_tds$H`), an adaptive spatial kernel and a capped neighbourhood (`control$NN < n`): a coefficient pinned at the largest grid value (or `Inf`) is now fitted as a global (OLS) component, as `predict()` assumes. The global test compared the bandwidth with `n - 2` instead of the capped sentinel `min(n, NN)`, so the component was fitted locally with `NN` neighbours. New test of the out-of-sample prediction of global, spatial-only and temporal-only components with `NN < n`.
+	•	`TDS_MGWR()` with `control$SE = TRUE`: the standard errors (`@sev`) and the per-coefficient effective degrees of freedom (`@edf_k`) are now those of the returned model. Since 1.4.1 the returned state is the sweep with the smallest RMSE, which need not be the last one, while `@sev` and `@edf_k` were still taken from the last sweep (relative SE errors up to about 18% on a 400-observation example; coefficients, `@Shat`, `@R_k`, `@tS` and `@AICc` were not affected). With `get_AIC = TRUE`, the standard errors are computed from the returned `@R_k`.
+	•	`search_bandwidths()` keeps the best score of each grid round. A "median - 10 MAD" outlier screen discarded a genuine minimum that lay well below the flat plateau of the large bandwidths, so the next round zoomed on the wrong interval and the search returned a worse local minimum (e.g. a GWR with n = 5000 and a fixed Gaussian kernel: h = 0.077, AICc 26100, instead of h = 0.032, AICc 24216). It became visible in 1.4.1, where a zero bandwidth no longer yields a score and the screen therefore saw one value fewer. Degenerate fits are rejected at the source instead: the AICc of a saturated binomial GWR is now `Inf`, as for the Gaussian AICc since 1.4.1.
+
 # 1.4.1 2026-10-01
 
 New estimator
@@ -16,7 +23,7 @@ Performance
 	•	Session cache of kernel weight matrices, used by `TDS_MGWR()` and `search_bandwidths()`. Its memory budget adapts to the size of the matrices and can be set with `options(mgwrsar.weights_cache_mb = )`; 0 disables the cache.
 	•	The multivariate engine no longer forms the Q factor when neither the hat matrix nor the partial hat matrices are requested.
 	•	In the top-down descent, compactly supported fixed kernels are truncated to the neighbours that carry non-zero weights at the current scale; `control_tds$trunc_gauss` offers the (approximate, off by default) equivalent for a fixed Gaussian kernel.
-	•	Overall, `tds_mgtwr` runs about 3 to 4 times faster (n = 1000 to 5000), and a GWR bandwidth search about 1.7 times faster.
+	•	Overall, compared with 1.3.2 (n = 1000, one core, same data, same selected model): `TDS_MGWR()` (`nns = 20`, `tol = 1e-3`, OLS start) takes 2.7 s instead of 10.5 s for `tds_mgwr` with a fixed Gaussian kernel, 1.2 s instead of 6.0 s with an adaptive bisquare kernel, and 14.5 s instead of 68.4 s for `tds_mgtwr` with fixed Gaussian space-time kernels. A GWR bandwidth search with `search_bandwidths()` (n = 1000, grid of 10, 3 rounds and golden-section refinement, AICc, one core) takes 0.93 s instead of 1.96 s with an adaptive bisquare kernel, and 1.12 s instead of 1.73 s with a fixed Gaussian kernel, with the same selected bandwidth and AICc.
 
 Dependencies
 	•	The package no longer imports SMUT (which brought SKAT, SPAtest and RSpectra with it). The dense products of hat matrices use the same Eigen product, now compiled in the package, or R's `%*%` when R is linked to an optimised BLAS (Accelerate, OpenBLAS, MKL, BLIS, ATLAS, FlexiBLAS, ArmPL), which is then much faster. `options(mgwrsar.matprod = "eigen")` or `"blas"` forces one of the two.

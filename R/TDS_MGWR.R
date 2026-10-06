@@ -1472,6 +1472,10 @@ TDS_MGWR <- function(formula, data, coords,
         mybestS = S
         mybestRk = Rk
       }
+      if (isTRUE(control$SE)) {
+        mybestSEV = SEV
+        mybestEDF = EDF
+      }
       delta_rmse = 1
       delta_AICc = 1
 
@@ -1693,6 +1697,11 @@ TDS_MGWR <- function(formula, data, coords,
           if (control_tds$get_AIC) {
             mybestS = S
             mybestRk = Rk
+          }
+          # SEV/EDF are overwritten at every sweep: keep those of the best one
+          if (isTRUE(control$SE)) {
+            mybestSEV = SEV
+            mybestEDF = EDF
           }
         }
 
@@ -2027,7 +2036,10 @@ TDS_MGWR <- function(formula, data, coords,
           sev_final <- matrix(0, nrow = n, ncol = length(varying))
           colnames(sev_final) <- varying
           for (k in varying) {
-            structure_val <- Vk[[k]] / (X[, k]^2)
+            # rowSums(R_k^2) of the returned (best) state, not Vk[[k]] of the
+            # last sweep: R_k is block-diagonal, so this is exactly the vk of
+            # compute_Rk_with_Var() when the best sweep is the last one.
+            structure_val <- rowSums(mybestRk[[k]]^2) / (X[, k]^2)
             structure_val[!is.finite(structure_val)] <- 0
 
             sev_final[, k] <- sqrt(sigma2_global * structure_val)
@@ -2035,7 +2047,7 @@ TDS_MGWR <- function(formula, data, coords,
           modelGWR@sev <- sev_final
         } else {
           # --- METHOD B: LOCAL INFERENCE (Fallback) ---
-          modelGWR@sev <- SEV
+          modelGWR@sev <- mybestSEV
           # --- METHOD C: ADJUSTED LOCAL INFERENCE ---
          if(FALSE) { tS_approx <- sum(n - EDF)
             sigma2_global_approx <- sum(data$e0^2) / max(1, (n - tS_approx ))
@@ -2043,7 +2055,7 @@ TDS_MGWR <- function(formula, data, coords,
             modelGWR@sev <- SEV * ratio_correction
          }
         }
-        modelGWR@edf_k <- EDF
+        modelGWR@edf_k <- mybestEDF
       }
 
 
