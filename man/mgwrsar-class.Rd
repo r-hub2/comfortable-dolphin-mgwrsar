@@ -134,6 +134,8 @@ A S4 class to represent the results of MGWRSAR, TDS-MGWR and related spatial mod
 
 \item{\code{HKMIN}}{list. List of minimum bandwidths per covariate for spatio-temporal models (TDS).}
 
+\item{\code{saturation}}{list. TDS calibration: the saturation filter of the candidate fits (\code{ratio}, number of candidates \code{excluded}, of component \code{updates} with an exclusion, and of updates with every candidate excluded, \code{all_excluded}).}
+
 \item{\code{isolated_idx}}{numeric. Indices of observations without sufficient neighbors.}
 
 \item{\code{my_crs}}{ANY. Coordinate Reference System (CRS) information.}
