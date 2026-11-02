@@ -64,7 +64,7 @@ A S4 class to represent the results of MGWRSAR, TDS-MGWR and related spatial mod
 
 \item{\code{pred}}{numeric. The vector of predicted values (out-of-sample).}
 
-\item{\code{sev}}{matrix. Local standard errors of varying coefficients.}
+\item{\code{sev}}{matrix. Local standard errors of varying coefficients: the variance of each local weighted fit, given the local residual variance (conditional on the fixed coefficients in a mixed model), or, for \code{TDS_MGWR()} with \code{get_AIC = TRUE}, the backfitting variance of Yu et al. (2020).}
 
 \item{\code{se}}{numeric. Standard errors of constant coefficients.}
 

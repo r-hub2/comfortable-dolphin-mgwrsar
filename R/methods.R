@@ -29,7 +29,7 @@
 #' @slot residuals numeric. The vector of residuals.
 #' @slot fit numeric. The vector of fitted values.
 #' @slot pred numeric. The vector of predicted values (out-of-sample).
-#' @slot sev matrix. Local standard errors of varying coefficients.
+#' @slot sev matrix. Local standard errors of varying coefficients: the variance of each local weighted fit, given the local residual variance (conditional on the fixed coefficients in a mixed model), or, for \code{TDS_MGWR()} with \code{get_AIC = TRUE}, the backfitting variance of Yu et al. (2020).
 #' @slot se numeric. Standard errors of constant coefficients.
 #' @slot tS numeric. The trace of the Hat matrix (effective number of parameters).
 #' @slot Shat matrix. The Hat matrix (or approximation).
